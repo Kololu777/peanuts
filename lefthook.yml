@@ -2,7 +2,6 @@
 #
 # Setup (once per clone):
 #   uv sync
-#   npm install            # commitlint for the commit-msg hook (needs Node.js)
 #   uv run lefthook install
 #
 # Run manually without committing:
@@ -59,5 +58,7 @@ commit-msg:
     commitlint:
       # Conventional Commits check; rules live in commitlint.config.mjs.
       # {1} is the path of the commit message file.
-      # --no: never download commitlint; run `npm install` first.
-      run: npm exec --no -- commitlint --edit {1}
+      # Needs Node.js. npx fetches the pinned packages into the npm cache on
+      # first use (network required once); no `npm install` / node_modules.
+      # config-conventional must be listed too: commitlint.config.mjs extends it.
+      run: npx --yes -p @commitlint/cli@21.2.4 -p @commitlint/config-conventional@21.2.4 commitlint --edit {1}

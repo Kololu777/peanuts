@@ -10,6 +10,3 @@ dist/
 build/
 *.egg-info/
 states/
-
-# Node dev tooling (commitlint)
-node_modules/
