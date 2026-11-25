@@ -1,0 +1,54 @@
+# Git hooks managed by lefthook (https://lefthook.dev)
+#
+# Setup (once per clone):
+#   uv sync
+#   uv run lefthook install
+#
+# Run manually without committing:
+#   uv run lefthook run pre-commit
+
+pre-commit:
+  # Run in priority order and stop at the first failure.
+  # The formatter must finish (and re-stage) before the linters read the files.
+  piped: true
+  commands:
+    whitespace:
+      priority: 1
+      # Trailing whitespace, blank lines at EOF and leftover conflict markers
+      # in the staged diff. Check only.
+      run: git diff --cached --check
+
+    large-files:
+      priority: 2
+      # Reject staged files larger than 1 MiB. Check only.
+      run: |
+        status=0
+        for f in {staged_files}; do
+          [ -f "$f" ] || continue
+          size=$(wc -c < "$f")
+          if [ "$size" -gt 1048576 ]; then
+            echo "too large (${size} bytes): $f"
+            status=1
+          fi
+        done
+        exit $status
+
+    ruff-format:
+      priority: 3
+      glob: "*.{py,pyi}"
+      # Auto-fix: format staged Python files and re-stage the result.
+      run: uv run ruff format --force-exclude {staged_files}
+      stage_fixed: true
+
+    ruff-check:
+      priority: 4
+      glob: "*.{py,pyi}"
+      # Check only (no --fix): lint violations stop the commit.
+      run: uv run ruff check --force-exclude {staged_files}
+
+    ty:
+      priority: 5
+      glob: "*.{py,pyi}"
+      # Check only. Types depend on other files, so check the whole project
+      # (scope comes from [tool.ty.src] in pyproject.toml).
+      run: uv run ty check
