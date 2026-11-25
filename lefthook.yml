@@ -53,3 +53,12 @@ pre-commit:
       # Check only. Types depend on other files, so check the whole project
       # (scope comes from [tool.ty.src] in pyproject.toml).
       run: uv run ty check
+
+commit-msg:
+  commands:
+    commitizen:
+      # Conventional Commits check ("type(scope): summary").
+      # Settings and exempt prefixes: [tool.commitizen] in pyproject.toml.
+      # {1} is the path of the commit message file.
+      # --allow-abort: let an empty message through so git aborts the commit itself.
+      run: uv run cz check --allow-abort --commit-msg-file {1}
