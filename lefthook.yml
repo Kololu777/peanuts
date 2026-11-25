@@ -4,12 +4,14 @@
 #   uv sync
 #   uv run lefthook install
 #
-# Run manually without committing:
+# Run manually without committing / pushing:
 #   uv run lefthook run pre-commit
+#   uv run lefthook run pre-push
 
+# pre-commit: fast, staged files only, may rewrite files (formatter).
 pre-commit:
   # Run in priority order and stop at the first failure.
-  # The formatter must finish (and re-stage) before the linters read the files.
+  # The formatter must finish (and re-stage) before the linter reads the files.
   piped: true
   commands:
     whitespace:
@@ -46,9 +48,19 @@ pre-commit:
       # Check only (no --fix): lint violations stop the commit.
       run: uv run ruff check --force-exclude {staged_files}
 
+# pre-push: whole project, check only -- never rewrites files.
+# Note: these inspect the working tree, not the exact commits being pushed.
+pre-push:
+  # Independent read-only checks: run them all so every failure is reported.
+  parallel: true
+  commands:
+    ruff-format-check:
+      run: uv run ruff format --check --output-format concise .
+
+    ruff-check:
+      run: uv run ruff check .
+
     ty:
-      priority: 5
-      glob: "*.{py,pyi}"
-      # Check only. Types depend on other files, so check the whole project
+      # Types depend on other files, so check the whole project
       # (scope comes from [tool.ty.src] in pyproject.toml).
       run: uv run ty check
