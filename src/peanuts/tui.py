@@ -46,6 +46,7 @@ from peanuts.models import (
     QuestionRecord,
     SystemStateResponse,
 )
+from peanuts.protocol import resolve_question_answer
 
 _STATUS_BADGE: dict[AgentStatus, tuple[str, str]] = {
     AgentStatus.IDLE: ("IDLE", "green"),
@@ -180,12 +181,23 @@ class PeanutsTUI(App[None]):
     #questions_box {
         height: auto;
         max-height: 8;
+        overflow-y: auto;
         border-top: solid magenta;
         padding: 0 1;
         margin-top: 1;
         display: none;
     }
     #questions_box.visible {
+        display: block;
+    }
+    #question_options {
+        height: auto;
+        max-height: 11;
+        border: solid magenta;
+        background: $surface-darken-1;
+        display: none;
+    }
+    #question_options.visible {
         display: block;
     }
     #completion_box {
@@ -227,6 +239,7 @@ class PeanutsTUI(App[None]):
         self._completion = CompletionStateMachine()
         self._suppress_completion_once: bool = False
         self._ws_task: asyncio.Task[None] | None = None
+        self._choice_question_id: str | None = None
 
     def on_mouse_up(self, _event: events.MouseUp) -> None:
         """Auto-copy selected text to clipboard as soon as drag-selection finishes."""
@@ -269,6 +282,7 @@ class PeanutsTUI(App[None]):
                 yield Static("", id="view_header")
                 yield VerticalScroll(id="chat_log")
                 yield Static("", id="questions_box")
+                yield OptionList(id="question_options")
                 yield OptionList(id="completion_box")
                 yield Input(
                     placeholder="◆ 00 root (@ファイル, /コマンド, #01遷移, @#01直接送信)",
@@ -564,20 +578,68 @@ class PeanutsTUI(App[None]):
 
     def _render_questions(self, questions: list[QuestionRecord]) -> None:
         box = self.query_one("#questions_box", Static)
+        self._render_question_options(questions[0] if questions else None)
         if not questions:
             box.remove_class("visible")
             box.update("")
             return
         txt = Text()
-        txt.append("人間への確認待ち (/answer <回答> で返答):\n", style="bold magenta")
+        if questions[0].options:
+            txt.append(
+                "人間への確認待ち (入力欄が空のとき ↑↓ で選択 → Enter で回答 / /answer <番号|自由記述> でも返答可):\n",
+                style="bold magenta",
+            )
+        else:
+            txt.append("人間への確認待ち (/answer <回答> で返答):\n", style="bold magenta")
         for idx, q in enumerate(questions):
             txt.append(f"  {q.id} ", style="bold")
             txt.append(f"({q.theme}): ", style="cyan")
             txt.append(q.question)
+            if idx > 0 and q.options:
+                txt.append(f"  [選択肢 {len(q.options)}件: /answer {q.id} <番号>]", style="dim")
             if idx < len(questions) - 1:
                 txt.append("\n")
         box.update(txt)
         box.add_class("visible")
+
+    def _render_question_options(self, question: QuestionRecord | None) -> None:
+        """Show the first open question's structured options as a selectable list (rebuilt only when it changes)."""
+        box = self.query_one("#question_options", OptionList)
+        if question is None or not question.options:
+            self._choice_question_id = None
+            box.clear_options()
+            box.remove_class("visible")
+            return
+        if question.id == self._choice_question_id:
+            return
+        self._choice_question_id = question.id
+        box.clear_options()
+        for idx, opt in enumerate(question.options, start=1):
+            row = Text()
+            row.append(f"{idx}. ", style="bold magenta")
+            row.append(opt.label, style="bold")
+            if opt.recommended:
+                row.append(" ★おすすめ", style="bold green")
+            if opt.description:
+                row.append(f"  {opt.description}", style="dim")
+            box.add_option(Option(row))
+        box.highlighted = None
+        box.add_class("visible")
+
+    def _choice_question(self) -> QuestionRecord | None:
+        """Return the open question currently offered in the options list, if any."""
+        if self._choice_question_id is None or self._state is None:
+            return None
+        return next((q for q in self._state.open_questions if q.id == self._choice_question_id), None)
+
+    async def _answer_choice(self, option_index: int) -> None:
+        question = self._choice_question()
+        if question is None or not 0 <= option_index < len(question.options):
+            return
+        try:
+            await self.client.answer_question(question.id, question.options[option_index].label)
+        except Exception as exc:
+            await self._append_notice(Text(f"Error: {exc}", style="bold red"))
 
     @staticmethod
     def _build_header_widget(title: str, style: str, ts: str) -> Static:
@@ -752,6 +814,7 @@ class PeanutsTUI(App[None]):
     def on_key(self, event: events.Key) -> None:
         """Intercept Up/Down/Tab/Enter/Escape while completion popup is open (TLA+ NoAccidentalSubmitWhileOpen)."""
         if not self._completion.popup_open:
+            self._on_question_choice_key(event)
             return
         if event.key == "down":
             self._completion.move_down()
@@ -773,7 +836,34 @@ class PeanutsTUI(App[None]):
             event.prevent_default()
             event.stop()
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+    def _on_question_choice_key(self, event: events.Key) -> None:
+        """Up/Down/Escape move the highlight in the question options list while the prompt input is empty."""
+        question = self._choice_question()
+        if question is None or event.key not in {"up", "down", "escape"}:
+            return
+        prompt_input = self.query_one("#prompt_input", Input)
+        if not prompt_input.has_focus or prompt_input.value:
+            return
+        box = self.query_one("#question_options", OptionList)
+        count = len(question.options)
+        if event.key == "escape":
+            if box.highlighted is None:
+                return
+            box.highlighted = None
+        elif box.highlighted is None:
+            # First arrow press lands on the recommended option (or the first/last one when none is marked).
+            recommended = next((i for i, o in enumerate(question.options) if o.recommended), None)
+            box.highlighted = recommended if recommended is not None else (0 if event.key == "down" else count - 1)
+        else:
+            box.highlighted = (box.highlighted + (1 if event.key == "down" else -1)) % count
+        event.prevent_default()
+        event.stop()
+
+    async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "question_options":
+            await self._answer_choice(event.option_index)
+            self.query_one("#prompt_input", Input).focus()
+            return
         if event.option_list.id != "completion_box":
             return
         self._apply_accepted_completion(index_1based=event.option_index + 1)
@@ -787,6 +877,10 @@ class PeanutsTUI(App[None]):
         self._completion.clear_trigger()
         self._render_completion_popup()
         if not text:
+            # Empty Enter confirms the option explicitly highlighted with Up/Down (never an implicit default).
+            highlighted = self.query_one("#question_options", OptionList).highlighted
+            if highlighted is not None:
+                await self._answer_choice(highlighted)
             return
         try:
             await self._handle_command_or_message(text)
@@ -829,6 +923,8 @@ class PeanutsTUI(App[None]):
                     "- `/copy all` : 表示中エージェントの **会話全体** をコピー",
                     "- `Ctrl+B` : 左サイドバーの表示/非表示切替",
                     "- `/answer <回答>` : 確認待ちの質問に回答（ID指定: `/answer <q_id> <回答>`）",
+                    "- 選択肢つきの質問 : 入力欄が空のとき `↑`/`↓` で選択 → `Enter` で回答"
+                    "（`/answer 2` の番号指定・クリック・自由記述も可）",
                     "- `/provider <claude|codex|mock>` : 選択中エージェントのCLIプロバイダ切替",
                     "- `/retry [02]` : `FAILED` 状態のエージェントを `IDLE` に復帰",
                     "- `/cancel <delegation_id>` : 待機中/確認中の委譲をキャンセル",
@@ -882,7 +978,8 @@ class PeanutsTUI(App[None]):
                 qid, answer = parts[0], parts[1].strip()
             else:
                 qid, answer = questions[0].id, rest
-            await self.client.answer_question(qid, answer)
+            target_q = next(q for q in questions if q.id == qid)
+            await self.client.answer_question(qid, resolve_question_answer(target_q, answer))
             return
 
         if text.startswith("/provider "):

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ProviderName = Literal["claude", "codex", "mock"]
 
@@ -129,9 +129,48 @@ class DelegateAction(BaseModel):
     message: str = ""
 
 
+class AskHumanOption(BaseModel):
+    """One selectable choice attached to an `ask_human` question."""
+
+    label: str = Field(min_length=1)
+    description: str = ""
+    recommended: bool = False
+
+
+MAX_ASK_HUMAN_OPTIONS = 9
+
+
+def _coerce_ask_human_options(value: object) -> list[object]:
+    """Leniently normalize agent-written options so a sloppy entry never discards the whole question."""
+    if not isinstance(value, list):
+        return []
+    cleaned: list[object] = []
+    for item in value:
+        if isinstance(item, AskHumanOption):
+            cleaned.append(item)
+        elif isinstance(item, str) and item.strip():
+            cleaned.append({"label": item.strip()})
+        elif isinstance(item, dict) and isinstance(item.get("label"), str) and item["label"].strip():
+            description = item.get("description")
+            cleaned.append(
+                {
+                    "label": item["label"].strip(),
+                    "description": description.strip() if isinstance(description, str) else "",
+                    "recommended": item.get("recommended") is True,
+                }
+            )
+    return cleaned[:MAX_ASK_HUMAN_OPTIONS]
+
+
 class AskHumanAction(BaseModel):
     action: Literal["ask_human"] = "ask_human"
     question: str = Field(min_length=1)
+    options: list[AskHumanOption] = Field(default_factory=list)
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _lenient_options(cls, value: object) -> list[object]:
+        return _coerce_ask_human_options(value)
 
 
 class IntegrateAction(BaseModel):
@@ -216,6 +255,7 @@ class QuestionRecord(BaseModel):
     delegation_id: str | None = None
     theme: str
     question: str
+    options: list[AskHumanOption] = Field(default_factory=list)
     answer: str | None = None
     status: QuestionStatus = QuestionStatus.OPEN
     created_at: datetime = Field(default_factory=utc_now)

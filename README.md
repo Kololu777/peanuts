@@ -59,6 +59,7 @@ peanuts openapi --out openapi.json
   - `recursive: 機能実装とテスト` → 親 → 子 → 孫 の再帰委譲
   - `db: 確認 マイグレーション実行` → 子から人間への確認質問（`/answer はい` で再開）
 - `/answer <回答>` / `/answer <q_id> <回答>`: `WAITING_HUMAN` の質問に回答
+  - エージェントが `ask_human` に `options`（`label` / `description` / `recommended`）を付けた場合は選択肢リストを表示。入力欄が空のとき `↑`/`↓` で選び `Enter` で回答（おすすめには ★ 印。`/answer 2` の番号指定・クリック・自由記述も可）
 - `/provider <claude|codex|mock>`: 選択中エージェントのプロバイダ切替
 - `/retry [agent_id]`: `FAILED` エージェントを `IDLE` に復帰
 - `/cancel <delegation_id>`: 委譲をキャンセル
