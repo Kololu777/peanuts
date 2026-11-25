@@ -6,10 +6,11 @@ import json
 import sqlite3
 import threading
 import uuid
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from peanuts.models import (
     ACTIVE_DELEGATION_STATUSES,
@@ -188,7 +189,7 @@ class PeanutsRepository:
             self._conn.close()
 
     @contextmanager
-    def _tx(self) -> Iterator[sqlite3.Connection]:
+    def _tx(self) -> Generator[sqlite3.Connection, None, None]:
         with self._lock:
             try:
                 yield self._conn
@@ -430,9 +431,7 @@ class PeanutsRepository:
                     "UPDATE agents SET worktree_path = ?, branch_name = ?, updated_at = ? WHERE id = 'integrator'",
                     (worktree_path, branch_name, _iso(now)),
                 )
-                updated = self._row_to_agent(
-                    conn.execute("SELECT * FROM agents WHERE id = 'integrator'").fetchone()
-                )
+                updated = self._row_to_agent(conn.execute("SELECT * FROM agents WHERE id = 'integrator'").fetchone())
                 return updated, []
             agent = AgentRecord(
                 id="integrator",
@@ -734,6 +733,100 @@ class PeanutsRepository:
             )
             return msg, [ev]
 
+    def direct_delegate_from_root(
+        self,
+        callee_id: str,
+        prompt: str,
+        *,
+        display_text: str | None = None,
+    ) -> tuple[DelegationRecord, MessageRecord, MessageRecord, list[EventRecord]]:
+        """TLA+ HumanDirectDelegate(c): Human -> Root (logged) -> deterministic Root -> c delegation.
+
+        Enforces callee.role_kind == 'worker', depth >= 1, status == IDLE, no active incoming
+        delegation, and empty callee inbox so AtMostOneActiveIncomingDelegation & NoConcurrentResume hold.
+        """
+        now = utc_now()
+        events: list[EventRecord] = []
+        with self._tx() as conn:
+            crow = conn.execute("SELECT * FROM agents WHERE id = ?", (callee_id,)).fetchone()
+            if crow is None:
+                raise KeyError(f"Agent not found: {callee_id}")
+            callee = self._row_to_agent(crow)
+            if callee.role_kind != "worker" or callee.depth < 1:
+                raise StateTransitionError(f"Agent '{callee.theme}' ({callee.id}) is not a delegatable worker")
+            if callee.status != AgentStatus.IDLE:
+                raise StateTransitionError(
+                    f"Agent '{callee.theme}' ({callee.id}) is currently {callee.status.value}; wait or retry first"
+                )
+            placeholders = ",".join("?" for _ in ACTIVE_DELEGATION_STATUSES)
+            active_cnt = conn.execute(
+                f"SELECT COUNT(*) AS c FROM delegations WHERE callee_id = ? AND status IN ({placeholders})",
+                [callee.id, *[s.value for s in ACTIVE_DELEGATION_STATUSES]],
+            ).fetchone()["c"]
+            if active_cnt > 0:
+                raise StateTransitionError(f"Agent '{callee.theme}' ({callee.id}) already has an active delegation")
+            inbox_cnt = conn.execute(
+                "SELECT COUNT(*) AS c FROM inbox_items WHERE agent_id = ?",
+                (callee.id,),
+            ).fetchone()["c"]
+            if inbox_cnt > 0:
+                raise StateTransitionError(f"Agent '{callee.theme}' ({callee.id}) has pending inbox items")
+
+            # 1. Log human message on root so it displays in the parent conversation
+            human_msg, human_ev = self._insert_message(
+                conn,
+                agent_id="root",
+                role=MessageRole.HUMAN,
+                content=display_text or prompt,
+                theme=callee.theme,
+                metadata={"direct_callee_id": callee.id},
+            )
+            events.append(human_ev)
+
+            # 2. Create formal Root -> Callee PENDING delegation
+            del_rec = DelegationRecord(
+                id=_new_id("del"),
+                caller_id="root",
+                callee_id=callee.id,
+                theme=callee.theme,
+                prompt=prompt,
+                status=DelegationStatus.PENDING,
+                created_at=now,
+                updated_at=now,
+            )
+            conn.execute(
+                """
+                INSERT INTO delegations (
+                    id, caller_id, callee_id, theme, prompt, status, result, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    del_rec.id,
+                    del_rec.caller_id,
+                    del_rec.callee_id,
+                    del_rec.theme,
+                    del_rec.prompt,
+                    del_rec.status.value,
+                    None,
+                    None,
+                    _iso(now),
+                    _iso(now),
+                ),
+            )
+            events.append(self._append_event(conn, EventType.DELEGATION_CREATED, del_rec.model_dump(mode="json")))
+
+            # 3. Log deterministic routing note on root
+            route_msg, route_ev = self._insert_message(
+                conn,
+                agent_id="root",
+                role=MessageRole.AGENT,
+                content=f"→ `▸ {callee.theme}` ({callee.provider}) へ確定委譲しました。",
+                theme=callee.theme,
+                metadata={"delegation_id": del_rec.id, "callee_id": callee.id},
+            )
+            events.append(route_ev)
+            return del_rec, human_msg, route_msg, events
+
     def enqueue_human_message(
         self,
         agent_id: str,
@@ -1031,9 +1124,7 @@ class PeanutsRepository:
                             _iso(now),
                         ),
                     )
-                    events.append(
-                        self._append_event(conn, EventType.AGENT_CREATED, callee.model_dump(mode="json"))
-                    )
+                    events.append(self._append_event(conn, EventType.AGENT_CREATED, callee.model_dump(mode="json")))
 
                 used_callees.add(callee.id)
                 del_rec = DelegationRecord(
@@ -1066,9 +1157,7 @@ class PeanutsRepository:
                     ),
                 )
                 created_delegations.append(del_rec)
-                events.append(
-                    self._append_event(conn, EventType.DELEGATION_CREATED, del_rec.model_dump(mode="json"))
-                )
+                events.append(self._append_event(conn, EventType.DELEGATION_CREATED, del_rec.model_dump(mode="json")))
 
             if note:
                 _, note_ev = self._insert_message(
@@ -1187,7 +1276,9 @@ class PeanutsRepository:
             )
             return updated_agent, q, events
 
-    def answer_question(self, question_id: str, answer_text: str) -> tuple[AgentRecord, QuestionRecord, list[EventRecord]]:
+    def answer_question(
+        self, question_id: str, answer_text: str
+    ) -> tuple[AgentRecord, QuestionRecord, list[EventRecord]]:
         """TLA+ HumanAnswer: WAITING_HUMAN -> IDLE + push answer to inbox, NEEDS_HUMAN -> IN_PROGRESS."""
         now = utc_now()
         events: list[EventRecord] = []
@@ -1241,11 +1332,19 @@ class PeanutsRepository:
             events.append(msg_ev)
             conn.execute(
                 "INSERT INTO inbox_items (agent_id, kind, content, theme, created_at) VALUES (?, ?, ?, ?, ?)",
-                (agent.id, "human_answer", f"Human answered your question ({q.question}): {answer_text}", agent.theme, _iso(now)),
+                (
+                    agent.id,
+                    "human_answer",
+                    f"Human answered your question ({q.question}): {answer_text}",
+                    agent.theme,
+                    _iso(now),
+                ),
             )
 
             updated_q = self._row_to_question(conn.execute("SELECT * FROM questions WHERE id = ?", (q.id,)).fetchone())
-            updated_agent = self._row_to_agent(conn.execute("SELECT * FROM agents WHERE id = ?", (agent.id,)).fetchone())
+            updated_agent = self._row_to_agent(
+                conn.execute("SELECT * FROM agents WHERE id = ?", (agent.id,)).fetchone()
+            )
             events.append(self._append_event(conn, EventType.QUESTION_ANSWERED, updated_q.model_dump(mode="json")))
             events.append(
                 self._append_event(
@@ -1316,7 +1415,9 @@ class PeanutsRepository:
                     self._append_event(conn, EventType.DELEGATION_UPDATED, updated_del.model_dump(mode="json"))
                 )
 
-            updated_agent = self._row_to_agent(conn.execute("SELECT * FROM agents WHERE id = ?", (agent.id,)).fetchone())
+            updated_agent = self._row_to_agent(
+                conn.execute("SELECT * FROM agents WHERE id = ?", (agent.id,)).fetchone()
+            )
             events.append(
                 self._append_event(
                     conn,
@@ -1390,9 +1491,7 @@ class PeanutsRepository:
             updated_del = self._row_to_delegation(
                 conn.execute("SELECT * FROM delegations WHERE id = ?", (delegation.id,)).fetchone()
             )
-            events.append(
-                self._append_event(conn, EventType.DELEGATION_UPDATED, updated_del.model_dump(mode="json"))
-            )
+            events.append(self._append_event(conn, EventType.DELEGATION_UPDATED, updated_del.model_dump(mode="json")))
             return updated_del, events
 
     def resume_parent_after_children(self, parent_id: str) -> tuple[AgentRecord, list[EventRecord]] | None:
@@ -1607,7 +1706,7 @@ class PeanutsRepository:
             if arow is not None and self._row_to_agent(arow).status == AgentStatus.WAITING_HUMAN:
                 validate_agent_transition(AgentStatus.WAITING_HUMAN, AgentStatus.IDLE)
                 conn.execute(
-                    "UPDATE agents SET status = ?, updated_at = ? WHERE id = 'integrator'",
+                    "UPDATE agents SET status = ?, question_count = 0, updated_at = ? WHERE id = 'integrator'",
                     (AgentStatus.IDLE.value, _iso(now)),
                 )
                 events.append(
@@ -1707,10 +1806,16 @@ class PeanutsRepository:
             if current == status:
                 return []
             validate_agent_transition(current, status)
-            conn.execute(
-                "UPDATE agents SET status = ?, last_error = ?, updated_at = ? WHERE id = 'integrator'",
-                (status.value, error, _iso(now)),
-            )
+            if status == AgentStatus.IDLE:
+                conn.execute(
+                    "UPDATE agents SET status = ?, question_count = 0, last_error = ?, updated_at = ? WHERE id = 'integrator'",
+                    (status.value, error, _iso(now)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE agents SET status = ?, last_error = ?, updated_at = ? WHERE id = 'integrator'",
+                    (status.value, error, _iso(now)),
+                )
             ev = self._append_event(
                 conn,
                 EventType.AGENT_STATUS_CHANGED,

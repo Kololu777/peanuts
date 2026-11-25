@@ -111,7 +111,9 @@ def test_codex_command_and_jsonl_parsing() -> None:
             json.dumps({"type": "thread.started", "thread_id": "0199a213-81c0-7800-8aa1-bbab2a035a53"}),
             json.dumps({"type": "turn.started"}),
             json.dumps({"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "thinking"}}),
-            json.dumps({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "All tests pass."}}),
+            json.dumps(
+                {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "All tests pass."}}
+            ),
             json.dumps({"type": "turn.completed"}),
         ]
     )

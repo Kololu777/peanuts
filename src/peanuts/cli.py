@@ -91,14 +91,28 @@ def _acquire_branch_lock(cwd: Path, server_url: str | None = None) -> BranchLock
 def default_command(
     ctx: typer.Context,
     db: Annotated[Path, typer.Option("--db", help="SQLite DB path")] = Path(".peanuts/peanuts.db"),
-    provider: Annotated[ProviderName | None, typer.Option("--provider", help="Root agent provider (claude|codex|mock)")] = None,
-    child_provider: Annotated[ProviderName | None, typer.Option("--child-provider", help="Default child provider")] = None,
+    provider: Annotated[
+        ProviderName | None, typer.Option("--provider", help="Root agent provider (claude|codex|mock)")
+    ] = None,
+    child_provider: Annotated[
+        ProviderName | None, typer.Option("--child-provider", help="Default child provider")
+    ] = None,
     max_depth: Annotated[int, typer.Option("--max-depth", help="Max recursive delegation depth")] = 2,
-    claude_permission_mode: Annotated[str, typer.Option("--claude-permission-mode", help="Claude CLI permission mode for workers/integrator")] = "auto",
-    codex_sandbox: Annotated[str, typer.Option("--codex-sandbox", help="Codex CLI sandbox mode for workers/integrator")] = "workspace-write",
-    worktrees: Annotated[bool, typer.Option("--worktrees/--no-worktrees", help="Isolate child workers in git worktrees")] = True,
-    auto_merge: Annotated[bool, typer.Option("--auto-merge/--no-auto-merge", help="Auto-queue finished child branches to Integrator")] = True,
-    server_url: Annotated[str | None, typer.Option("--server-url", help="Connect to an existing peanuts server")] = None,
+    claude_permission_mode: Annotated[
+        str, typer.Option("--claude-permission-mode", help="Claude CLI permission mode for workers/integrator")
+    ] = "auto",
+    codex_sandbox: Annotated[
+        str, typer.Option("--codex-sandbox", help="Codex CLI sandbox mode for workers/integrator")
+    ] = "workspace-write",
+    worktrees: Annotated[
+        bool, typer.Option("--worktrees/--no-worktrees", help="Isolate child workers in git worktrees")
+    ] = True,
+    auto_merge: Annotated[
+        bool, typer.Option("--auto-merge/--no-auto-merge", help="Auto-queue finished child branches to Integrator")
+    ] = True,
+    server_url: Annotated[
+        str | None, typer.Option("--server-url", help="Connect to an existing peanuts server")
+    ] = None,
 ) -> None:
     """Launch the TUI (default subcommand when running `peanuts`)."""
     if ctx.invoked_subcommand is not None:
@@ -122,13 +136,23 @@ def serve(
     port: Annotated[int, typer.Option("--port", help="Bind port")] = 8765,
     db: Annotated[Path, typer.Option("--db", help="SQLite DB path")] = Path(".peanuts/peanuts.db"),
     provider: Annotated[ProviderName | None, typer.Option("--provider", help="Root agent provider")] = None,
-    child_provider: Annotated[ProviderName | None, typer.Option("--child-provider", help="Default child provider")] = None,
+    child_provider: Annotated[
+        ProviderName | None, typer.Option("--child-provider", help="Default child provider")
+    ] = None,
     max_depth: Annotated[int, typer.Option("--max-depth", help="Max recursive delegation depth")] = 2,
     max_questions: Annotated[int, typer.Option("--max-questions", help="Max ask_human loops per turn")] = 3,
-    claude_permission_mode: Annotated[str, typer.Option("--claude-permission-mode", help="Claude CLI permission mode for workers/integrator")] = "auto",
-    codex_sandbox: Annotated[str, typer.Option("--codex-sandbox", help="Codex CLI sandbox mode for workers/integrator")] = "workspace-write",
-    worktrees: Annotated[bool, typer.Option("--worktrees/--no-worktrees", help="Isolate child workers in git worktrees")] = True,
-    auto_merge: Annotated[bool, typer.Option("--auto-merge/--no-auto-merge", help="Auto-queue finished child branches to Integrator")] = True,
+    claude_permission_mode: Annotated[
+        str, typer.Option("--claude-permission-mode", help="Claude CLI permission mode for workers/integrator")
+    ] = "auto",
+    codex_sandbox: Annotated[
+        str, typer.Option("--codex-sandbox", help="Codex CLI sandbox mode for workers/integrator")
+    ] = "workspace-write",
+    worktrees: Annotated[
+        bool, typer.Option("--worktrees/--no-worktrees", help="Isolate child workers in git worktrees")
+    ] = True,
+    auto_merge: Annotated[
+        bool, typer.Option("--auto-merge/--no-auto-merge", help="Auto-queue finished child branches to Integrator")
+    ] = True,
 ) -> None:
     """Run the FastAPI REST + WebSocket backend (for TUI and Web+React)."""
     url = f"http://{host}:{port}"
@@ -158,14 +182,28 @@ def serve(
 @app.command()
 def tui(
     db: Annotated[Path, typer.Option("--db", help="SQLite DB path")] = Path(".peanuts/peanuts.db"),
-    provider: Annotated[ProviderName | None, typer.Option("--provider", help="Root agent provider (claude|codex|mock)")] = None,
-    child_provider: Annotated[ProviderName | None, typer.Option("--child-provider", help="Default child provider")] = None,
+    provider: Annotated[
+        ProviderName | None, typer.Option("--provider", help="Root agent provider (claude|codex|mock)")
+    ] = None,
+    child_provider: Annotated[
+        ProviderName | None, typer.Option("--child-provider", help="Default child provider")
+    ] = None,
     max_depth: Annotated[int, typer.Option("--max-depth", help="Max recursive delegation depth")] = 2,
-    claude_permission_mode: Annotated[str, typer.Option("--claude-permission-mode", help="Claude CLI permission mode for workers/integrator")] = "auto",
-    codex_sandbox: Annotated[str, typer.Option("--codex-sandbox", help="Codex CLI sandbox mode for workers/integrator")] = "workspace-write",
-    worktrees: Annotated[bool, typer.Option("--worktrees/--no-worktrees", help="Isolate child workers in git worktrees")] = True,
-    auto_merge: Annotated[bool, typer.Option("--auto-merge/--no-auto-merge", help="Auto-queue finished child branches to Integrator")] = True,
-    server_url: Annotated[str | None, typer.Option("--server-url", help="Connect to an existing peanuts server")] = None,
+    claude_permission_mode: Annotated[
+        str, typer.Option("--claude-permission-mode", help="Claude CLI permission mode for workers/integrator")
+    ] = "auto",
+    codex_sandbox: Annotated[
+        str, typer.Option("--codex-sandbox", help="Codex CLI sandbox mode for workers/integrator")
+    ] = "workspace-write",
+    worktrees: Annotated[
+        bool, typer.Option("--worktrees/--no-worktrees", help="Isolate child workers in git worktrees")
+    ] = True,
+    auto_merge: Annotated[
+        bool, typer.Option("--auto-merge/--no-auto-merge", help="Auto-queue finished child branches to Integrator")
+    ] = True,
+    server_url: Annotated[
+        str | None, typer.Option("--server-url", help="Connect to an existing peanuts server")
+    ] = None,
 ) -> None:
     """Launch the Textual TUI (auto-starts an embedded FastAPI server if --server-url is omitted)."""
     if server_url is not None:

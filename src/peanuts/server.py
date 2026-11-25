@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from peanuts import __version__
+from peanuts.completion import CompletionKind, CompletionResponse, complete_commands, complete_files
 from peanuts.config import PeanutsConfig
 from peanuts.git_ops import GitError
 from peanuts.models import (
     AgentRecord,
     AnswerQuestionRequest,
     DelegationRecord,
+    DirectDelegateRequest,
+    DirectDelegateResponse,
     EventRecord,
     HealthResponse,
     MergeJobRecord,
@@ -42,7 +45,7 @@ def create_app(
     orchestrator = Orchestrator(cfg, runners=runners)
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
@@ -138,6 +141,24 @@ def create_app(
     async def list_delegations() -> list[DelegationRecord]:
         return orchestrator.repo.list_delegations()
 
+    @app.post("/api/v1/delegations/direct", response_model=DirectDelegateResponse, tags=["delegations"])
+    async def direct_delegate(body: DirectDelegateRequest) -> DirectDelegateResponse:
+        try:
+            delegation, human_msg, route_msg = await orchestrator.direct_delegate_to_child(
+                body.callee_id,
+                body.prompt,
+                display_text=body.display_text,
+            )
+            return DirectDelegateResponse(
+                delegation=delegation,
+                human_message=human_msg,
+                route_message=route_msg,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StateTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/api/v1/delegations/{delegation_id}/cancel", response_model=DelegationRecord, tags=["delegations"])
     async def cancel_delegation(delegation_id: str) -> DelegationRecord:
         try:
@@ -177,8 +198,24 @@ def create_app(
     async def resume_merges() -> list[MergeJobRecord]:
         return await orchestrator.resume_merge_queue()
 
+    @app.get("/api/v1/complete", response_model=CompletionResponse, tags=["completion"])
+    async def complete(
+        kind: CompletionKind,
+        q: str = Query(default=""),
+        limit: int = Query(default=12, ge=1, le=50),
+    ) -> CompletionResponse:
+        if kind == "command":
+            items = complete_commands(q, limit=limit)
+        elif kind == "file":
+            items = await asyncio.to_thread(complete_files, cfg.cwd, q, limit)
+        else:
+            items = []
+        return CompletionResponse(kind=kind, query=q, items=items)
+
     @app.get("/api/v1/events", response_model=list[EventRecord], tags=["events"])
-    async def list_events(after_seq: int = Query(default=0, ge=0), limit: int = Query(default=200, ge=1, le=1000)) -> list[EventRecord]:
+    async def list_events(
+        after_seq: int = Query(default=0, ge=0), limit: int = Query(default=200, ge=1, le=1000)
+    ) -> list[EventRecord]:
         return orchestrator.repo.list_events_after(after_seq=after_seq, limit=limit)
 
     # ------------------------------------------------------------------

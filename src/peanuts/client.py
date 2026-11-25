@@ -8,9 +8,12 @@ from collections.abc import AsyncIterator
 import httpx
 import websockets
 
+from peanuts.completion import CompletionKind, CompletionResponse
 from peanuts.models import (
     AgentRecord,
     DelegationRecord,
+    DirectDelegateRequest,
+    DirectDelegateResponse,
     EventRecord,
     HealthResponse,
     MergeJobRecord,
@@ -101,6 +104,18 @@ class PeanutsClient:
         resp.raise_for_status()
         return DelegationRecord.model_validate(resp.json())
 
+    async def direct_delegate(
+        self,
+        callee_id: str,
+        prompt: str,
+        *,
+        display_text: str | None = None,
+    ) -> DirectDelegateResponse:
+        req = DirectDelegateRequest(callee_id=callee_id, prompt=prompt, display_text=display_text)
+        resp = await self._http.post("/api/v1/delegations/direct", json=req.model_dump(mode="json"))
+        resp.raise_for_status()
+        return DirectDelegateResponse.model_validate(resp.json())
+
     async def trigger_merge(self, agent_id: str) -> MergeJobRecord:
         resp = await self._http.post(f"/api/v1/agents/{agent_id}/merge")
         resp.raise_for_status()
@@ -110,6 +125,11 @@ class PeanutsClient:
         resp = await self._http.post("/api/v1/merges/resume")
         resp.raise_for_status()
         return [MergeJobRecord.model_validate(item) for item in resp.json()]
+
+    async def complete(self, kind: CompletionKind, query: str, limit: int = 12) -> CompletionResponse:
+        resp = await self._http.get("/api/v1/complete", params={"kind": kind, "q": query, "limit": limit})
+        resp.raise_for_status()
+        return CompletionResponse.model_validate(resp.json())
 
     async def stream_events(self, after_seq: int = 0) -> AsyncIterator[EventRecord]:
         async with websockets.connect(self.ws_url(after_seq=after_seq)) as ws:

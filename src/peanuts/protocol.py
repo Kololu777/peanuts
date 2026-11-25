@@ -60,7 +60,7 @@ def build_agent_prompt(
         )
 
     actions_doc = [
-        '1. Final reply to caller (default if you respond in plain text):\n'
+        "1. Final reply to caller (default if you respond in plain text):\n"
         '```peanuts-action\n{"action": "reply", "message": "your response"}\n```'
     ]
     if can_delegate:
@@ -83,7 +83,7 @@ def build_agent_prompt(
             f"4. Dispatch git operations on parent branch `{base_branch or 'HEAD'}` to the Single-Writer Integrator:\n"
             '   - Merge a child branch: {"action": "integrate", "mode": "merge", "agent_id": "<child_id>", "message": "..."}\n'
             '   - Resume paused merges: {"action": "integrate", "mode": "resume", "message": "..."}\n'
-            '   - Run git housekeeping (e.g. git add/commit on base branch): '
+            "   - Run git housekeeping (e.g. git add/commit on base branch): "
             '{"action": "integrate", "mode": "instruction", "instruction": "detailed git task", "message": "..."}\n'
             "```peanuts-action\n"
             '{"action": "integrate", "mode": "instruction", "instruction": "Stage and commit initial project files", "message": "Asking Integrator to commit on base branch."}\n'

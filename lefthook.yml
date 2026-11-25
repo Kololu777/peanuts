@@ -43,8 +43,9 @@ pre-commit:
     ruff-check:
       priority: 4
       glob: "*.{py,pyi}"
-      # Check only (no --fix): lint violations stop the commit.
-      run: uv run ruff check --force-exclude {staged_files}
+      # Auto-fix safe lint issues (e.g. import sorting) and re-stage; stop only on unfixable errors.
+      run: uv run ruff check --fix --force-exclude {staged_files}
+      stage_fixed: true
 
     ty:
       priority: 5

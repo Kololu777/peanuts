@@ -380,3 +380,560 @@ async def test_root_integrate_instruction_cleans_dirty_base_supersedes_question_
         )
     finally:
         await orch.shutdown()
+
+
+async def test_instruction_job_failures_still_dirty_and_clean_base_start(tmp_path: Path) -> None:
+    """Covers TLA+ InstructionFailedOrStillDirty (runner error, leaked MERGE_HEAD, still dirty) + clean-base start."""
+    from peanuts.runners.base import RunnerError
+
+    mode = "clean_ok"
+
+    class _InstructionScenarioRunner:
+        provider: ProviderName = "mock"
+
+        async def run_turn(self, turn: TurnInput, on_progress: ProgressCallback | None = None) -> TurnOutput:
+            agent = turn.agent
+            user_input = turn.prompt.split("[INPUT]\n", 1)[-1].strip()
+            if agent.role_kind == "integrator":
+                if mode == "fail":
+                    raise RunnerError("instruction runner failed")
+                if mode == "leave_merge_head":
+                    # Simulate a misbehaving instruction that leaves an unresolved conflict / MERGE_HEAD
+                    _git(turn.cwd, "merge", "--no-commit", "--no-ff", "conflict-src")
+                    return TurnOutput(text="left merge uncommitted", provider_session_id="int-mh")
+                if mode == "still_dirty":
+                    # Succeeds without cleaning human_wip.txt
+                    return TurnOutput(text="checked git status only", provider_session_id="int-sd")
+                # clean_ok: create and commit a file cleanly on base branch
+                (turn.cwd / "housekeeping.txt").write_text("clean instruction\n", encoding="utf-8")
+                _git(turn.cwd, "add", "housekeeping.txt")
+                _git(turn.cwd, "commit", "-m", "housekeeping commit")
+                return TurnOutput(text="housekeeping done", provider_session_id="int-ok")
+
+            if agent.role_kind == "root":
+                if user_input.startswith("Integrator ") or user_input.startswith("Child agent update"):
+                    return TurnOutput(text="root noted", provider_session_id="root-1")
+                if user_input == "run_instruction":
+                    payload = {
+                        "action": "integrate",
+                        "mode": "instruction",
+                        "instruction": "perform git housekeeping",
+                        "message": "dispatched instruction",
+                    }
+                    return TurnOutput(
+                        text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="root-1"
+                    )
+                if user_input == "spawn_worker":
+                    payload = {
+                        "action": "delegate",
+                        "tasks": [{"theme": "w1", "provider": "mock", "prompt": "edit-w1"}],
+                    }
+                    return TurnOutput(
+                        text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="root-1"
+                    )
+            (turn.cwd / "w1.txt").write_text("from w1\n", encoding="utf-8")
+            return TurnOutput(text="w1 edited", provider_session_id="w1-s")
+
+    # 1. Clean-base IDLE -> RUNNING_INSTRUCTION -> MERGED
+    repo = tmp_path / "repo_inst_cases"
+    _init_git_repo(repo, branch="main")
+    cfg = PeanutsConfig(
+        db_path=repo / ".peanuts" / "peanuts.db",
+        cwd=repo,
+        root_provider="mock",
+        default_child_provider="mock",
+        enable_worktrees=True,
+        auto_merge=True,
+    )
+    orch = Orchestrator(cfg, runners={"mock": _InstructionScenarioRunner()})
+    try:
+        assert orch.worktree_mgr is not None
+        mode = "clean_ok"
+        await orch.send_human_message("run_instruction")
+        await orch.wait_until_quiescent()
+        assert (repo / "housekeeping.txt").read_text(encoding="utf-8") == "clean instruction\n"
+        assert orch.repo.list_merge_jobs()[-1].status == MergeJobStatus.MERGED
+        check_merge_queue_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_merge_jobs(),
+            base_dirty=orch.worktree_mgr.is_dirty(repo),
+            base_merge_in_progress=orch.worktree_mgr.is_merge_in_progress(),
+        )
+
+        # 2. RunnerError during RUNNING_INSTRUCTION -> ABORTED, integrator returns IDLE
+        mode = "fail"
+        await orch.send_human_message("run_instruction")
+        await orch.wait_until_quiescent()
+        failed_job = orch.repo.list_merge_jobs()[-1]
+        assert failed_job.status == MergeJobStatus.ABORTED
+        assert failed_job.error is not None and "instruction runner failed" in failed_job.error
+        integrator = orch.repo.get_agent("integrator")
+        assert integrator is not None and integrator.status.value == "IDLE"
+        check_merge_queue_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_merge_jobs(),
+            base_dirty=orch.worktree_mgr.is_dirty(repo),
+            base_merge_in_progress=orch.worktree_mgr.is_merge_in_progress(),
+        )
+
+        # 3. Instruction leaves MERGE_HEAD -> auto git merge --abort + ABORTED (CleanBaseWhenIntegratorIdle)
+        _git(repo, "checkout", "-b", "conflict-src")
+        (repo / "extra.txt").write_text("side\n", encoding="utf-8")
+        _git(repo, "add", "extra.txt")
+        _git(repo, "commit", "-m", "side commit")
+        _git(repo, "checkout", "main")
+        mode = "leave_merge_head"
+        await orch.send_human_message("run_instruction")
+        await orch.wait_until_quiescent()
+        mh_job = orch.repo.list_merge_jobs()[-1]
+        assert mh_job.status == MergeJobStatus.ABORTED
+        assert not orch.worktree_mgr.is_merge_in_progress()
+        check_merge_queue_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_merge_jobs(),
+            base_dirty=orch.worktree_mgr.is_dirty(repo),
+            base_merge_in_progress=orch.worktree_mgr.is_merge_in_progress(),
+        )
+
+        # 4. Instruction succeeds without cleaning dirty base -> paused BRANCH_MERGE stays WAITING_CLEAN_BASE
+        (repo / "human_wip.txt").write_text("still dirty\n", encoding="utf-8")
+        await orch.send_human_message("spawn_worker")
+        await orch.wait_until_quiescent()
+        branch_job = next(j for j in orch.repo.list_merge_jobs() if j.kind == "branch_merge")
+        assert branch_job.status == MergeJobStatus.WAITING_CLEAN_BASE
+
+        mode = "still_dirty"
+        await orch.send_human_message("run_instruction")
+        await orch.wait_until_quiescent()
+        branch_job_after = orch.repo.get_merge_job(branch_job.id)
+        assert branch_job_after is not None and branch_job_after.status == MergeJobStatus.WAITING_CLEAN_BASE
+        assert not (repo / "w1.txt").exists()
+        check_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_delegations(),
+            orch.repo.list_questions(only_open=False),
+            max_depth=cfg.max_depth,
+            max_questions_per_turn=cfg.max_questions_per_turn,
+        )
+        check_merge_queue_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_merge_jobs(),
+            base_dirty=orch.worktree_mgr.is_dirty(repo),
+            base_merge_in_progress=orch.worktree_mgr.is_merge_in_progress(),
+        )
+    finally:
+        await orch.shutdown()
+
+
+async def test_root_integrate_merge_resume_modes_and_rejection_guards(tmp_path: Path) -> None:
+    """Covers IntegrateAction(mode='merge'), IntegrateAction(mode='resume'), non-root rejection, and empty instruction."""
+
+    class _IntegrateModesRunner:
+        provider: ProviderName = "mock"
+
+        async def run_turn(self, turn: TurnInput, on_progress: ProgressCallback | None = None) -> TurnOutput:
+            agent = turn.agent
+            user_input = turn.prompt.split("[INPUT]\n", 1)[-1].strip()
+            if agent.role_kind == "root":
+                if user_input.startswith("Child agent update") or user_input.startswith("Integrator "):
+                    return TurnOutput(text="root ack", provider_session_id="r1")
+                if user_input == "delegate_worker":
+                    payload = {
+                        "action": "delegate",
+                        "tasks": [{"theme": "feat-x", "provider": "mock", "prompt": "do-edit"}],
+                    }
+                    return TurnOutput(text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="r1")
+                if user_input == "delegate_bad_integrate":
+                    payload = {
+                        "action": "delegate",
+                        "tasks": [{"theme": "rogue", "provider": "mock", "prompt": "try-integrate"}],
+                    }
+                    return TurnOutput(text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="r1")
+                if user_input == "empty_instruction":
+                    payload = {"action": "integrate", "mode": "instruction", "instruction": "   "}
+                    return TurnOutput(text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="r1")
+                if user_input.startswith("merge_worker:"):
+                    worker_id = user_input.split(":", 1)[1]
+                    payload = {"action": "integrate", "mode": "merge", "agent_id": worker_id}
+                    return TurnOutput(text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="r1")
+                if user_input == "resume_queue":
+                    payload = {"action": "integrate", "mode": "resume"}
+                    return TurnOutput(text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="r1")
+                return TurnOutput(text="ok", provider_session_id="r1")
+
+            if user_input == "try-integrate":
+                payload = {"action": "integrate", "mode": "instruction", "instruction": "git status"}
+                return TurnOutput(text=f"```peanuts-action\n{json.dumps(payload)}\n```", provider_session_id="rogue-s")
+            (turn.cwd / "feat_x.txt").write_text("feature x\n", encoding="utf-8")
+            return TurnOutput(text="edited feat_x", provider_session_id="fx-s")
+
+    repo = tmp_path / "repo_modes"
+    _init_git_repo(repo, branch="main")
+    cfg = PeanutsConfig(
+        db_path=repo / ".peanuts" / "peanuts.db",
+        cwd=repo,
+        root_provider="mock",
+        default_child_provider="mock",
+        enable_worktrees=True,
+        auto_merge=False,
+    )
+    orch = Orchestrator(cfg, runners={"mock": _IntegrateModesRunner()})
+    try:
+        assert orch.worktree_mgr is not None
+        # 1. Worker attempting IntegrateAction is rejected
+        await orch.send_human_message("delegate_bad_integrate")
+        await orch.wait_until_quiescent()
+        assert orch.repo.list_merge_jobs() == []
+        rogue_del = next(d for d in orch.repo.list_delegations() if d.theme == "rogue")
+        assert rogue_del.result is not None and "integrate rejected" in rogue_del.result
+
+        # 2. Root empty instruction is rejected
+        await orch.send_human_message("empty_instruction")
+        await orch.wait_until_quiescent()
+        assert orch.repo.list_merge_jobs() == []
+
+        # 3. Worker edits worktree; base is dirty -> Root triggers mode='merge' -> pauses WAITING_CLEAN_BASE
+        await orch.send_human_message("delegate_worker")
+        await orch.wait_until_quiescent()
+        worker = orch.repo.find_child_by_theme("root", "feat-x")
+        assert worker is not None
+
+        (repo / "wip.txt").write_text("dirty\n", encoding="utf-8")
+        await orch.send_human_message(f"merge_worker:{worker.id}")
+        await orch.wait_until_quiescent()
+        jobs = orch.repo.list_merge_jobs()
+        assert len(jobs) == 1 and jobs[0].status == MergeJobStatus.WAITING_CLEAN_BASE
+        assert len(orch.repo.list_questions(only_open=True)) == 1
+
+        # 4. Human cleans base and Root emits IntegrateAction(mode='resume') -> supersedes question & merges!
+        _git(repo, "add", "wip.txt")
+        _git(repo, "commit", "-m", "clean wip")
+        await orch.send_human_message("resume_queue")
+        await orch.wait_until_quiescent()
+
+        assert orch.repo.list_questions(only_open=True) == []
+        assert (repo / "feat_x.txt").read_text(encoding="utf-8") == "feature x\n"
+        assert orch.repo.list_merge_jobs()[0].status == MergeJobStatus.MERGED
+        check_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_delegations(),
+            orch.repo.list_questions(only_open=False),
+            max_depth=cfg.max_depth,
+            max_questions_per_turn=cfg.max_questions_per_turn,
+        )
+        check_merge_queue_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_merge_jobs(),
+            base_dirty=orch.worktree_mgr.is_dirty(repo),
+            base_merge_in_progress=orch.worktree_mgr.is_merge_in_progress(),
+        )
+    finally:
+        await orch.shutdown()
+
+
+async def test_resume_merge_queue_command_after_manual_clean_maintains_invariants(tmp_path: Path) -> None:
+    """Covers /resume-merges (resume_merge_queue) after human cleans dirty base while Integrator was WAITING_HUMAN."""
+    repo = tmp_path / "repo_resume_cmd"
+    _init_git_repo(repo, branch="main")
+    (repo / "human_wip.txt").write_text("dirty wip\n", encoding="utf-8")
+
+    runner = _WorktreeEditingRunner()
+    cfg = PeanutsConfig(
+        db_path=repo / ".peanuts" / "peanuts.db",
+        cwd=repo,
+        root_provider="mock",
+        default_child_provider="mock",
+        enable_worktrees=True,
+        auto_merge=True,
+        max_questions_per_turn=1,
+    )
+    orch = Orchestrator(cfg, runners={"mock": runner})
+    try:
+        assert orch.worktree_mgr is not None
+        await orch.send_human_message("two_files")
+        await orch.wait_until_quiescent()
+
+        assert len(orch.repo.list_questions(only_open=True)) == 1
+        assert any(j.status == MergeJobStatus.WAITING_CLEAN_BASE for j in orch.repo.list_merge_jobs())
+
+        # Human cleans working tree manually and triggers `/resume-merges` instead of `/answer ok`
+        _git(repo, "add", "human_wip.txt")
+        _git(repo, "commit", "-m", "clean wip")
+        await orch.resume_merge_queue()
+        await orch.wait_until_quiescent()
+
+        assert orch.repo.list_questions(only_open=True) == []
+        assert (repo / "auth.txt").read_text(encoding="utf-8") == "auth ok"
+        assert (repo / "docs.txt").read_text(encoding="utf-8") == "docs ok"
+        assert all(j.status == MergeJobStatus.MERGED for j in orch.repo.list_merge_jobs())
+
+        # Second dirty-base cycle must still succeed (regression test: Integrator question_count resets on IDLE)
+        (repo / "human_wip_2.txt").write_text("second dirty wip\n", encoding="utf-8")
+        await orch.send_human_message("edit_shared")
+        await orch.wait_until_quiescent()
+        open_qs_2 = orch.repo.list_questions(only_open=True)
+        assert len(open_qs_2) == 1 and open_qs_2[0].agent_id == "integrator"
+
+        _git(repo, "add", "human_wip_2.txt")
+        _git(repo, "commit", "-m", "clean wip 2")
+        await orch.resume_merge_queue()
+        await orch.wait_until_quiescent()
+
+        assert orch.repo.list_questions(only_open=True) == []
+        assert all(j.status == MergeJobStatus.MERGED for j in orch.repo.list_merge_jobs())
+        check_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_delegations(),
+            orch.repo.list_questions(only_open=False),
+            max_depth=cfg.max_depth,
+            max_questions_per_turn=cfg.max_questions_per_turn,
+        )
+        check_merge_queue_invariants(
+            orch.repo.list_agents(),
+            orch.repo.list_merge_jobs(),
+            base_dirty=orch.worktree_mgr.is_dirty(repo),
+            base_merge_in_progress=orch.worktree_mgr.is_merge_in_progress(),
+        )
+    finally:
+        await orch.shutdown()
+
+
+async def test_crash_recovery_aborts_interrupted_merge_jobs_and_clears_merge_head(tmp_path: Path) -> None:
+    """Crash recovery aborts MERGING/CONFLICT_RESOLVING/RUNNING_INSTRUCTION jobs and cleans MERGE_HEAD."""
+    repo = tmp_path / "repo_crash_merge"
+    _init_git_repo(repo, branch="main")
+    cfg = PeanutsConfig(
+        db_path=repo / ".peanuts" / "peanuts.db",
+        cwd=repo,
+        root_provider="mock",
+        default_child_provider="mock",
+        enable_worktrees=True,
+        auto_merge=False,
+    )
+    orch1 = Orchestrator(cfg)
+    assert orch1.worktree_mgr is not None
+    # Create an active MERGING job in DB + a real uncommitted MERGE_HEAD in git
+    _git(repo, "checkout", "-b", "side-branch")
+    (repo / "side.txt").write_text("side\n", encoding="utf-8")
+    _git(repo, "add", "side.txt")
+    _git(repo, "commit", "-m", "side")
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--no-commit", "--no-ff", "side-branch")
+    assert orch1.worktree_mgr.is_merge_in_progress()
+
+    job, _ = orch1.repo.enqueue_merge_job(
+        worker_agent_id="root",
+        theme="side",
+        source_branch="side-branch",
+        target_branch="main",
+    )
+    orch1.repo.transition_merge_job(job.id, MergeJobStatus.MERGING)
+    orch1.repo.close()  # Simulate abrupt crash without calling shutdown()
+
+    orch2 = Orchestrator(cfg)
+    try:
+        assert orch2.worktree_mgr is not None
+        assert not orch2.worktree_mgr.is_merge_in_progress()
+        recovered = orch2.repo.get_merge_job(job.id)
+        assert recovered is not None and recovered.status == MergeJobStatus.ABORTED
+        check_merge_queue_invariants(
+            orch2.repo.list_agents(),
+            orch2.repo.list_merge_jobs(),
+            base_dirty=orch2.worktree_mgr.is_dirty(repo),
+            base_merge_in_progress=orch2.worktree_mgr.is_merge_in_progress(),
+        )
+    finally:
+        await orch2.shutdown()
+
+
+def test_single_integrator_writer_db_lock_and_duplicate_enqueue_dedup(tmp_path: Path) -> None:
+    """Covers DB-level SingleIntegratorWriter exclusion and duplicate branch enqueue deduplication."""
+    from peanuts.db import PeanutsRepository
+    from peanuts.state_machine import StateTransitionError
+
+    repo = PeanutsRepository(tmp_path / "mq_lock.db")
+    try:
+        repo.ensure_root_agent("mock")
+        j1, _ = repo.enqueue_merge_job(
+            worker_agent_id="root",
+            theme="a",
+            source_branch="peanuts/a-1",
+            target_branch="main",
+        )
+        # Enqueueing the same source_branch while QUEUED deduplicates cleanly
+        j1_dup, dup_evs = repo.enqueue_merge_job(
+            worker_agent_id="root",
+            theme="a",
+            source_branch="peanuts/a-1",
+            target_branch="main",
+        )
+        assert j1_dup.id == j1.id
+        assert dup_evs == []
+
+        j2, _ = repo.enqueue_instruction_job(instruction="git status", target_branch="main")
+        repo.transition_merge_job(j1.id, MergeJobStatus.MERGING)
+
+        # Second job cannot become active while j1 is MERGING
+        with pytest.raises(StateTransitionError, match="SingleIntegratorWriter"):
+            repo.transition_merge_job(j2.id, MergeJobStatus.RUNNING_INSTRUCTION)
+    finally:
+        repo.close()
+
+
+def test_stateful_merge_queue_tla_model_exploration(tmp_path: Path) -> None:
+    """Randomized deterministic exploration of all PeanutsMergeQueue.tla actions with per-step invariant checks."""
+    import random
+
+    from peanuts.db import PeanutsRepository
+    from peanuts.models import AgentStatus
+
+    rng = random.Random(20261126)
+    repo = PeanutsRepository(tmp_path / "stateful_mq.db")
+    try:
+        repo.ensure_root_agent("mock")
+        repo.ensure_integrator_agent("mock", worktree_path=str(tmp_path), branch_name="main")
+        base_dirty = False
+        base_merge_in_progress = False
+        job_seq = 0
+
+        def verify() -> None:
+            check_invariants(
+                repo.list_agents(),
+                repo.list_delegations(),
+                repo.list_questions(only_open=False),
+                max_depth=2,
+                max_questions_per_turn=2,
+            )
+            check_merge_queue_invariants(
+                repo.list_agents(),
+                repo.list_merge_jobs(),
+                base_dirty=base_dirty,
+                base_merge_in_progress=base_merge_in_progress,
+            )
+
+        verify()
+        action_counts: dict[str, int] = {}
+
+        for step in range(200):
+            integrator = repo.get_agent("integrator")
+            assert integrator is not None
+            jobs = repo.list_merge_jobs()
+            queued_branch = [j for j in jobs if j.kind == "branch_merge" and j.status == MergeJobStatus.QUEUED]
+            queued_inst = [j for j in jobs if j.kind == "instruction" and j.status == MergeJobStatus.QUEUED]
+            waiting_jobs = [j for j in jobs if j.status == MergeJobStatus.WAITING_CLEAN_BASE]
+            merging_jobs = [j for j in jobs if j.status == MergeJobStatus.MERGING]
+            conflict_jobs = [j for j in jobs if j.status == MergeJobStatus.CONFLICT_RESOLVING]
+            inst_running = [j for j in jobs if j.status == MergeJobStatus.RUNNING_INSTRUCTION]
+
+            candidates: list[str] = ["enqueue_branch", "enqueue_instruction"]
+            if not base_dirty and integrator.status != AgentStatus.RUNNING and not base_merge_in_progress:
+                candidates.append("human_edits_base")
+            if base_dirty and integrator.status != AgentStatus.RUNNING:
+                candidates.append("human_cleans_base")
+            if queued_branch and base_dirty and integrator.status != AgentStatus.RUNNING:
+                candidates.append("pause_dirty")
+            if waiting_jobs and not base_dirty:
+                candidates.append("resume_clean")
+            if (
+                queued_branch
+                and not base_dirty
+                and integrator.status == AgentStatus.IDLE
+                and not base_merge_in_progress
+            ):
+                candidates.append("start_merge")
+            if (
+                queued_inst
+                and integrator.status in {AgentStatus.IDLE, AgentStatus.WAITING_HUMAN}
+                and not base_merge_in_progress
+            ):
+                candidates.append("start_instruction")
+            if merging_jobs:
+                candidates.extend(["merge_clean_success", "merge_hits_conflict"])
+            if conflict_jobs:
+                candidates.extend(["conflict_resolved", "conflict_aborted"])
+            if inst_running:
+                candidates.extend(["inst_success_clean", "inst_failed_or_dirty"])
+
+            choice = rng.choice(candidates)
+            action_counts[choice] = action_counts.get(choice, 0) + 1
+
+            if choice == "enqueue_branch":
+                job_seq += 1
+                repo.enqueue_merge_job(
+                    worker_agent_id="root",
+                    theme=f"w{job_seq}",
+                    source_branch=f"peanuts/w-{job_seq}",
+                    target_branch="main",
+                )
+            elif choice == "enqueue_instruction":
+                repo.enqueue_instruction_job(instruction=f"inst-{step}", target_branch="main")
+            elif choice == "human_edits_base":
+                base_dirty = True
+            elif choice == "human_cleans_base":
+                base_dirty = False
+                repo.supersede_integrator_dirty_questions()
+            elif choice == "pause_dirty":
+                j = rng.choice(queued_branch)
+                repo.transition_merge_job(j.id, MergeJobStatus.WAITING_CLEAN_BASE)
+                open_int_qs = [q for q in repo.list_questions(only_open=True) if q.agent_id == "integrator"]
+                if not open_int_qs and integrator.status == AgentStatus.IDLE:
+                    repo.set_integrator_status(AgentStatus.RUNNING)
+                    repo.ask_human("integrator", "dirty base?", max_questions_per_turn=2)
+            elif choice == "resume_clean":
+                repo.resume_waiting_merge_jobs()
+            elif choice == "start_merge":
+                j = rng.choice(queued_branch)
+                repo.set_integrator_status(AgentStatus.RUNNING)
+                repo.transition_merge_job(j.id, MergeJobStatus.MERGING)
+                base_merge_in_progress = True
+            elif choice == "start_instruction":
+                j = rng.choice(queued_inst)
+                repo.supersede_integrator_dirty_questions()
+                repo.set_integrator_status(AgentStatus.RUNNING)
+                repo.transition_merge_job(j.id, MergeJobStatus.RUNNING_INSTRUCTION)
+            elif choice == "merge_clean_success":
+                j = merging_jobs[0]
+                repo.transition_merge_job(j.id, MergeJobStatus.MERGED)
+                repo.set_integrator_status(AgentStatus.IDLE)
+                base_merge_in_progress = False
+            elif choice == "merge_hits_conflict":
+                j = merging_jobs[0]
+                repo.transition_merge_job(j.id, MergeJobStatus.CONFLICT_RESOLVING, conflicted_files=["shared.txt"])
+            elif choice == "conflict_resolved":
+                j = conflict_jobs[0]
+                repo.transition_merge_job(j.id, MergeJobStatus.MERGED, conflicted_files=[])
+                repo.set_integrator_status(AgentStatus.IDLE)
+                base_merge_in_progress = False
+            elif choice == "conflict_aborted":
+                j = conflict_jobs[0]
+                repo.transition_merge_job(j.id, MergeJobStatus.ABORTED, error="aborted")
+                repo.set_integrator_status(AgentStatus.IDLE)
+                base_merge_in_progress = False
+            elif choice == "inst_success_clean":
+                j = inst_running[0]
+                repo.transition_merge_job(j.id, MergeJobStatus.MERGED)
+                repo.set_integrator_status(AgentStatus.IDLE)
+                base_dirty = False
+            elif choice == "inst_failed_or_dirty":
+                j = inst_running[0]
+                repo.transition_merge_job(j.id, MergeJobStatus.ABORTED, error="failed")
+                repo.set_integrator_status(AgentStatus.IDLE)
+                base_dirty = True
+
+            verify()
+
+        for expected in (
+            "pause_dirty",
+            "resume_clean",
+            "start_merge",
+            "start_instruction",
+            "merge_clean_success",
+            "merge_hits_conflict",
+            "conflict_resolved",
+            "conflict_aborted",
+            "inst_success_clean",
+            "inst_failed_or_dirty",
+        ):
+            assert action_counts.get(expected, 0) > 0, f"MergeQueue action {expected} was never exercised"
+    finally:
+        repo.close()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -56,7 +56,7 @@ class EventBus:
                         pass
 
     @asynccontextmanager
-    async def subscribe(self, maxsize: int = 512) -> AsyncIterator[asyncio.Queue[EventRecord]]:
+    async def subscribe(self, maxsize: int = 512) -> AsyncGenerator[asyncio.Queue[EventRecord], None]:
         queue: asyncio.Queue[EventRecord] = asyncio.Queue(maxsize=maxsize)
         self._subscribers.add(queue)
         try:
@@ -96,9 +96,7 @@ class Orchestrator:
         # Detect git repo & base branch (the branch where peanuts was launched = parent's branch)
         self.git_ctx = detect_git_context(config.cwd)
         self.worktree_mgr: WorktreeManager | None = (
-            WorktreeManager(self.git_ctx)
-            if (config.enable_worktrees and self.git_ctx.supports_worktrees)
-            else None
+            WorktreeManager(self.git_ctx) if (config.enable_worktrees and self.git_ctx.supports_worktrees) else None
         )
 
         resolved_root_provider = config.resolve_root_provider()
@@ -198,6 +196,23 @@ class Orchestrator:
         await self.pump()
         return agent_id, msg
 
+    async def direct_delegate_to_child(
+        self,
+        callee_id: str,
+        prompt: str,
+        *,
+        display_text: str | None = None,
+    ) -> tuple[DelegationRecord, MessageRecord, MessageRecord]:
+        """TLA+ HumanDirectDelegate: Human -> Root (displayed) -> deterministic Root -> child delegation."""
+        delegation, human_msg, route_msg, events = self.repo.direct_delegate_from_root(
+            callee_id,
+            prompt,
+            display_text=display_text,
+        )
+        self.event_bus.publish(events)
+        await self.pump()
+        return delegation, human_msg, route_msg
+
     async def answer_question(self, question_id: str, answer: str) -> QuestionRecord:
         agent, question, events = self.repo.answer_question(question_id, answer)
         self.event_bus.publish(events)
@@ -257,8 +272,9 @@ class Orchestrator:
 
     async def resume_merge_queue(self) -> list[MergeJobRecord]:
         """Re-queue any merge jobs paused on WAITING_CLEAN_BASE and trigger Integrator."""
-        events = self.repo.resume_waiting_merge_jobs()
-        self.event_bus.publish(events)
+        sup_evs = self.repo.supersede_integrator_dirty_questions()
+        res_evs = self.repo.resume_waiting_merge_jobs()
+        self.event_bus.publish(sup_evs + res_evs)
         await self.pump()
         return self.repo.list_merge_jobs()
 

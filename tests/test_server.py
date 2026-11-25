@@ -133,12 +133,25 @@ async def test_textual_tui_end_to_end_against_live_fastapi(tmp_path: Path) -> No
                         break
             assert tui._state is not None
             alpha = next(a for a in tui._state.agents if a.theme == "alpha")
-            tui._selected_agent_id = alpha.id
-            await tui._load_selected_agent_messages(alpha.id)
+            alpha_short = tui._short_id_by_agent[alpha.id]
+
+            # `@#01 follow up` -> Human -> Root (displayed) -> deterministic Root -> alpha delegation -> Root report!
+            await tui._handle_command_or_message(f"@#{alpha_short} direct follow up")
+            for _ in range(40):
+                await pilot.pause(0.05)
+                root_msgs_now = await tui.client.get_agent_messages("root")
+                if any("direct follow up" in m.content and m.role.value == "agent" for m in root_msgs_now):
+                    break
+            root_msgs_after = await tui.client.get_agent_messages("root")
+            assert any(f"@#{alpha_short} direct follow up" in m.content for m in root_msgs_after)
+            assert any("direct follow up" in m.content for m in await tui.client.get_agent_messages(alpha.id))
+
+            # Switch to child via `#01` (2-digit short ID)
+            await tui._handle_command_or_message(f"#{alpha_short}")
+            assert tui._selected_agent_id == alpha.id
             alpha_msgs = await tui.client.get_agent_messages(alpha.id)
             assert any(m.role.value == "progress" for m in alpha_msgs)
             assert len(tui._seen_message_ids) == len(alpha_msgs)
     finally:
         server.should_exit = True
         await asyncio.to_thread(thread.join, 3.0)
-

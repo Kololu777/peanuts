@@ -9,7 +9,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Literal
 
@@ -160,7 +160,7 @@ class BranchLock:
             "branch": self.git_ctx.base_branch or "__nogit__",
             "cwd": str(self.git_ctx.cwd),
             "server_url": self._server_url or "",
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
         }
         self._fp.seek(0)
         self._fp.truncate()
@@ -204,7 +204,9 @@ class WorktreeManager:
             return wt_path, branch_name
 
         # If branch already exists from an earlier session, reuse it cleanly; else branch off base_branch
-        exists_proc = _run_git(["show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"], self.repo_root, check=False)
+        exists_proc = _run_git(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"], self.repo_root, check=False
+        )
         if exists_proc.returncode == 0:
             _run_git(["worktree", "add", str(wt_path), branch_name], self.repo_root)
         else:

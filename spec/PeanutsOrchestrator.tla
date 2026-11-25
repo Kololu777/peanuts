@@ -93,6 +93,27 @@ HumanSendMessage ==
     /\ UNCHANGED <<agentAllocated, agentStatus, parentOf, depth, activeTurns,
                    pendingQuestion, questionCount, delStatus, delCaller, delCallee, nextDelId>>
 
+\* 1b. Human sends `@#c <prompt>` -> recorded on RootAgent, deterministic routing creates
+\*     a formal RootAgent -> c delegation directly (without blocking RootAgent or
+\*     violating AtMostOneActiveIncomingDelegation).
+HumanDirectDelegate(c) ==
+    /\ humanReqCount < MaxHumanRequests
+    /\ nextDelId <= MaxDelegations
+    /\ c \in ChildAgents
+    /\ agentAllocated[c]
+    /\ depth[c] >= 1
+    /\ ActiveIncomingDels(c) = {}
+    /\ agentStatus[c] = "IDLE"
+    /\ inboxCount[c] = 0
+    /\ LET d == nextDelId
+       IN /\ humanReqCount' = humanReqCount + 1
+          /\ delStatus' = [delStatus EXCEPT ![d] = "PENDING"]
+          /\ delCaller' = [delCaller EXCEPT ![d] = RootAgent]
+          /\ delCallee' = [delCallee EXCEPT ![d] = c]
+          /\ nextDelId' = nextDelId + 1
+    /\ UNCHANGED <<agentAllocated, agentStatus, parentOf, depth, activeTurns,
+                   inboxCount, pendingQuestion, questionCount>>
+
 \* 2. An IDLE agent with inbox work starts a turn (acquires single-turn CLI lock)
 StartTurn(a) ==
     /\ agentAllocated[a]
@@ -288,6 +309,7 @@ QuiescentDone ==
 \* ---------------------------------------------------------------------------
 Next ==
     \/ HumanSendMessage
+    \/ \E c \in ChildAgents : HumanDirectDelegate(c)
     \/ \E a \in Agents : StartTurn(a)
     \/ \E a \in Agents : FinishTurnReply(a)
     \/ \E a \in Agents, c \in ChildAgents : DelegateOne(a, c)

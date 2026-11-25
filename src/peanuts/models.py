@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -13,7 +13,7 @@ ProviderName = Literal["claude", "codex", "mock"]
 
 def utc_now() -> datetime:
     """Return timezone-aware UTC timestamp."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class AgentStatus(StrEnum):
@@ -270,6 +270,18 @@ class SendMessageRequest(BaseModel):
 class SendMessageResponse(BaseModel):
     agent_id: str
     message: MessageRecord
+
+
+class DirectDelegateRequest(BaseModel):
+    callee_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    display_text: str | None = None
+
+
+class DirectDelegateResponse(BaseModel):
+    delegation: DelegationRecord
+    human_message: MessageRecord
+    route_message: MessageRecord
 
 
 class AnswerQuestionRequest(BaseModel):

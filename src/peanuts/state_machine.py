@@ -162,9 +162,7 @@ def check_invariants(
                 )
             active_incoming[callee.id] = active_incoming.get(callee.id, 0) + 1
             if active_incoming[callee.id] > 1:
-                raise InvariantViolationError(
-                    f"AtMostOneActiveIncomingDelegation violated for callee {callee.id}"
-                )
+                raise InvariantViolationError(f"AtMostOneActiveIncomingDelegation violated for callee {callee.id}")
 
 
 ALLOWED_MERGE_JOB_TRANSITIONS: dict[MergeJobStatus, frozenset[MergeJobStatus]] = {
