@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +17,7 @@ from peanuts.models import (
     ACTIVE_MERGE_STATUSES,
     AgentRecord,
     AgentStatus,
+    AskHumanOption,
     DelegationRecord,
     DelegationStatus,
     EventRecord,
@@ -31,6 +32,7 @@ from peanuts.models import (
     QuestionStatus,
     utc_now,
 )
+from peanuts.protocol import format_question_options
 from peanuts.state_machine import (
     StateTransitionError,
     validate_agent_transition,
@@ -113,7 +115,8 @@ CREATE TABLE IF NOT EXISTS questions (
     answer TEXT,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    answered_at TEXT
+    answered_at TEXT,
+    options_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
@@ -183,6 +186,9 @@ class PeanutsRepository:
             self._conn.execute("ALTER TABLE merge_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'branch_merge'")
         if "instruction" not in mj_cols:
             self._conn.execute("ALTER TABLE merge_jobs ADD COLUMN instruction TEXT")
+        q_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(questions)").fetchall()}
+        if "options_json" not in q_cols:
+            self._conn.execute("ALTER TABLE questions ADD COLUMN options_json TEXT NOT NULL DEFAULT '[]'")
 
     def close(self) -> None:
         with self._lock:
@@ -274,6 +280,7 @@ class PeanutsRepository:
             delegation_id=row["delegation_id"],
             theme=row["theme"],
             question=row["question"],
+            options=[AskHumanOption.model_validate(o) for o in json.loads(row["options_json"] or "[]")],
             answer=row["answer"],
             status=QuestionStatus(row["status"]),
             created_at=_parse_dt(row["created_at"]),
@@ -1195,6 +1202,7 @@ class PeanutsRepository:
         agent_id: str,
         question_text: str,
         *,
+        options: Sequence[AskHumanOption] = (),
         provider_session_id: str | None = None,
         max_questions_per_turn: int,
     ) -> tuple[AgentRecord, QuestionRecord, list[EventRecord]]:
@@ -1236,16 +1244,31 @@ class PeanutsRepository:
                 delegation_id=delegation_id,
                 theme=agent.theme,
                 question=question_text,
+                options=list(options),
                 status=QuestionStatus.OPEN,
                 created_at=now,
             )
             conn.execute(
                 """
-                INSERT INTO questions (id, agent_id, delegation_id, theme, question, answer, status, created_at, answered_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO questions (
+                    id, agent_id, delegation_id, theme, question, answer, status, created_at, answered_at, options_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (q.id, q.agent_id, q.delegation_id, q.theme, q.question, None, q.status.value, _iso(now), None),
+                (
+                    q.id,
+                    q.agent_id,
+                    q.delegation_id,
+                    q.theme,
+                    q.question,
+                    None,
+                    q.status.value,
+                    _iso(now),
+                    None,
+                    json.dumps([o.model_dump() for o in q.options], ensure_ascii=False),
+                ),
             )
+            options_md = format_question_options(q.options)
             conn.execute(
                 """
                 UPDATE agents
@@ -1258,7 +1281,7 @@ class PeanutsRepository:
                 conn,
                 agent_id=agent.id,
                 role=MessageRole.AGENT,
-                content=f"[Question for human] {question_text}",
+                content=f"[Question for human] {question_text}" + (f"\n\n{options_md}" if options_md else ""),
                 theme=agent.theme,
                 metadata={"question_id": q.id},
             )

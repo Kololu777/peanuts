@@ -8,7 +8,7 @@ from collections.abc import Sequence
 
 from pydantic import TypeAdapter, ValidationError
 
-from peanuts.models import AgentAction, AgentRecord, ProviderName, ReplyAction
+from peanuts.models import AgentAction, AgentRecord, AskHumanOption, ProviderName, QuestionRecord, ReplyAction
 
 _ACTION_ADAPTER: TypeAdapter[AgentAction] = TypeAdapter(AgentAction)
 _FENCED_ACTION_RE = re.compile(r"```peanuts-action\s*(\{.*?\})\s*```", re.DOTALL)
@@ -76,7 +76,14 @@ def build_agent_prompt(
     if remaining_questions > 0:
         actions_doc.append(
             f"3. Ask the human a clarification question (remaining budget: {remaining_questions}):\n"
-            '```peanuts-action\n{"action": "ask_human", "question": "your question"}\n```'
+            '```peanuts-action\n{"action": "ask_human", "question": "your question"}\n```\n'
+            '   When the human should pick between alternatives, add an optional "options" list (2-6 items) instead '
+            "of writing the choices inside the question text. Peanuts shows them as a selectable list; the human "
+            "may still type a free-form answer. Keep each label short, put trade-offs in description, and mark at "
+            "most one option as recommended:\n"
+            '```peanuts-action\n{"action": "ask_human", "question": "your question", "options": '
+            '[{"label": "choice A", "description": "why / trade-off", "recommended": true}, '
+            '{"label": "choice B", "description": "why / trade-off"}]}\n```'
         )
     if agent.depth == 0 and integrator_available:
         actions_doc.append(
@@ -99,6 +106,29 @@ def build_agent_prompt(
         + "\n".join(actions_doc)
         + f"\n\n[INPUT]\n{user_input}"
     )
+
+
+def format_question_options(options: Sequence[AskHumanOption]) -> str:
+    """Render ask_human options as a numbered Markdown list (empty string when there are none)."""
+    lines: list[str] = []
+    for idx, opt in enumerate(options, start=1):
+        line = f"{idx}. **{opt.label}**"
+        if opt.recommended:
+            line += " (おすすめ)"
+        if opt.description:
+            line += f" — {opt.description}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def resolve_question_answer(question: QuestionRecord, raw_answer: str) -> str:
+    """Map a bare option number (e.g. `2`) to that option's label; any other text is a free-form answer."""
+    answer = raw_answer.strip()
+    if question.options and answer.isascii() and answer.isdigit():
+        index = int(answer)
+        if 1 <= index <= len(question.options):
+            return question.options[index - 1].label
+    return answer
 
 
 def parse_agent_action(raw_output: str) -> AgentAction:

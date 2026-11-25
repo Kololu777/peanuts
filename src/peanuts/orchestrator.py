@@ -26,7 +26,7 @@ from peanuts.models import (
     ReplyAction,
     SystemStateResponse,
 )
-from peanuts.protocol import build_agent_prompt, parse_agent_action
+from peanuts.protocol import build_agent_prompt, format_question_options, parse_agent_action
 from peanuts.runners import (
     AgentRunner,
     ClaudeRunner,
@@ -543,6 +543,9 @@ class Orchestrator:
                     f"[Question budget ({self.config.max_questions_per_turn}) exhausted; returning final reply] "
                     f"{action.question}"
                 )
+                options_md = format_question_options(action.options)
+                if options_md:
+                    fallback += f"\n\n{options_md}"
                 self._post_worker_reply_git_sync(agent)
                 _, _, events = self.repo.finish_turn_reply(
                     agent.id,
@@ -555,6 +558,7 @@ class Orchestrator:
             _, _, events = self.repo.ask_human(
                 agent.id,
                 action.question,
+                options=action.options,
                 provider_session_id=provider_session_id,
                 max_questions_per_turn=self.config.max_questions_per_turn,
             )
