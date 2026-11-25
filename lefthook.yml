@@ -55,10 +55,9 @@ pre-commit:
 
 commit-msg:
   commands:
-    commitlint:
-      # Conventional Commits check; rules live in commitlint.config.mjs.
+    commitizen:
+      # Conventional Commits check ("type(scope): summary").
+      # Settings and exempt prefixes: [tool.commitizen] in pyproject.toml.
       # {1} is the path of the commit message file.
-      # Needs Node.js. npx fetches the pinned packages into the npm cache on
-      # first use (network required once); no `npm install` / node_modules.
-      # config-conventional must be listed too: commitlint.config.mjs extends it.
-      run: npx --yes -p @commitlint/cli@21.2.4 -p @commitlint/config-conventional@21.2.4 commitlint --edit {1}
+      # --allow-abort: let an empty message through so git aborts the commit itself.
+      run: uv run cz check --allow-abort --commit-msg-file {1}
