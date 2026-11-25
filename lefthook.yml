@@ -2,16 +2,15 @@
 #
 # Setup (once per clone):
 #   uv sync
+#   npm install            # commitlint for the commit-msg hook (needs Node.js)
 #   uv run lefthook install
 #
-# Run manually without committing / pushing:
+# Run manually without committing:
 #   uv run lefthook run pre-commit
-#   uv run lefthook run pre-push
 
-# pre-commit: fast, staged files only, may rewrite files (formatter).
 pre-commit:
   # Run in priority order and stop at the first failure.
-  # The formatter must finish (and re-stage) before the linter reads the files.
+  # The formatter must finish (and re-stage) before the linters read the files.
   piped: true
   commands:
     whitespace:
@@ -48,19 +47,17 @@ pre-commit:
       # Check only (no --fix): lint violations stop the commit.
       run: uv run ruff check --force-exclude {staged_files}
 
-# pre-push: whole project, check only -- never rewrites files.
-# Note: these inspect the working tree, not the exact commits being pushed.
-pre-push:
-  # Independent read-only checks: run them all so every failure is reported.
-  parallel: true
-  commands:
-    ruff-format-check:
-      run: uv run ruff format --check --output-format concise .
-
-    ruff-check:
-      run: uv run ruff check .
-
     ty:
-      # Types depend on other files, so check the whole project
+      priority: 5
+      glob: "*.{py,pyi}"
+      # Check only. Types depend on other files, so check the whole project
       # (scope comes from [tool.ty.src] in pyproject.toml).
       run: uv run ty check
+
+commit-msg:
+  commands:
+    commitlint:
+      # Conventional Commits check; rules live in commitlint.config.mjs.
+      # {1} is the path of the commit message file.
+      # --no: never download commitlint; run `npm install` first.
+      run: npm exec --no -- commitlint --edit {1}

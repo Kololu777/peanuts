@@ -1,0 +1,9 @@
+{
+  "name": "peanuts-dev-tools",
+  "private": true,
+  "description": "Dev tooling only (commitlint for the lefthook commit-msg hook). The project itself is Python / uv.",
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4"
+  }
+}
