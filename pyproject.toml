@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "peanuts"
+version = "0.1.0"
+description = "OpenAI dots-inspired parent-child CLI agent mediator (Claude Code / Codex) with FastAPI backend and Textual TUI"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.10.0",
+    "textual>=1.0.0",
+    "typer>=0.15.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=14.0",
+]
+
+[project.scripts]
+peanuts = "peanuts.cli:main"
+
+[dependency-groups]
+dev = [
+    "lefthook>=2.2.3",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "ruff>=0.17.6",
+    "ty>=0.0.109",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/peanuts"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src", "tests"]
